@@ -1,7 +1,8 @@
 import os
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
-from model_pipeline import analyze_image
+from ml_models import analyze_handwriting_real
+from model_pipeline import generate_quiz  # Keep quiz generation from old pipeline
 
 app = Flask(__name__)
 
@@ -35,8 +36,11 @@ def analyze():
         file.save(filepath)
         
         try:
-            # Pass the image path to our ML pipeline
-            result = analyze_image(filepath)
+            # Get optional extracted text if provided
+            extracted_text = request.form.get('text', '')
+            
+            # Use REAL ML-based analysis (no random noise)
+            result = analyze_handwriting_real(filepath, extracted_text)
             
             # Clean up the file after processing
             if os.path.exists(filepath):
@@ -44,22 +48,25 @@ def analyze():
                 
             return jsonify({
                 "dyslexia_score": result.get("dyslexia_score", 0.0),
+                "dyslexia_details": result.get("dyslexia_details", {}),
                 "dysgraphia_score": result.get("dysgraphia_score", 0.0),
-                "analysis": result.get("analysis", "Analysis completed successfully."),
-                "external_details": result.get("external_details")
+                "dysgraphia_details": result.get("dysgraphia_details", {}),
+                "analysis_type": result.get("analysis_type", "Real ML Analysis"),
+                "features_extracted": result.get("features_extracted", {}),
+                "success": "error" not in result
             }), 200
             
         except Exception as e:
              # Clean up the file on error
             if os.path.exists(filepath):
                 os.remove(filepath)
-            return jsonify({"error": str(e)}), 500
+            return jsonify({"error": str(e), "dyslexia_score": 0.0, "dysgraphia_score": 0.0}), 500
 
     return jsonify({"error": "Invalid file type"}), 400
 
 @app.route('/analyze/external', methods=['POST'])
 def analyze_external():
-    # This route invokes the same analysis pipeline but attempts external AI enrichment
+    # This route uses the same real ML analysis 
     if 'file' not in request.files:
         return jsonify({"error": "No file part"}), 400
 
@@ -73,20 +80,24 @@ def analyze_external():
         file.save(filepath)
 
         try:
-            result = analyze_image(filepath)
+            extracted_text = request.form.get('text', '')
+            result = analyze_handwriting_real(filepath, extracted_text)
             if os.path.exists(filepath):
                 os.remove(filepath)
 
             return jsonify({
                 "dyslexia_score": result.get("dyslexia_score", 0.0),
+                "dyslexia_details": result.get("dyslexia_details", {}),
                 "dysgraphia_score": result.get("dysgraphia_score", 0.0),
-                "analysis": result.get("analysis", "Analysis completed successfully."),
-                "external_details": result.get("external_details")
+                "dysgraphia_details": result.get("dysgraphia_details", {}),
+                "analysis_type": result.get("analysis_type", "Real ML Analysis"),
+                "features_extracted": result.get("features_extracted", {}),
+                "success": "error" not in result
             }), 200
         except Exception as e:
             if os.path.exists(filepath):
                 os.remove(filepath)
-            return jsonify({"error": str(e)}), 500
+            return jsonify({"error": str(e), "dyslexia_score": 0.0, "dysgraphia_score": 0.0}), 500
 
     return jsonify({"error": "Invalid file type"}), 400
 
