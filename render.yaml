@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: neuroscan-python-ai
+    env: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9
+      - key: PORT
+        value: 5000
+    healthCheckPath: /health

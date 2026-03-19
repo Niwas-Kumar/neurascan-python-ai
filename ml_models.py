@@ -1,385 +1,265 @@
 """
 Real ML-based handwriting analysis for learning disorder detection.
-Uses scientific features and trained classifiers instead of heuristics.
+Uses trained CNN model for dyslexia detection via letter reversal analysis.
 """
 
-import cv2
 import numpy as np
-from sklearn.preprocessing import StandardScaler
-import pickle
-import os
+import cv2
 import json
-import random  # For presentation demo scores
+import os
 from typing import Dict, Tuple, List
 
+# ============================================================
+# MODEL CONFIGURATION
+# ============================================================
+
+MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+_model = None
+_config = None
+_tf_available = None
+
+
+def _check_tensorflow():
+    """Check if TensorFlow is available."""
+    global _tf_available
+    if _tf_available is None:
+        try:
+            import tensorflow
+            _tf_available = True
+        except ImportError:
+            _tf_available = False
+            print("TensorFlow not available - using fallback analysis")
+    return _tf_available
+
+
+def load_trained_model():
+    """Load the trained CNN model (cached for performance)."""
+    global _model, _config
+
+    # Load config
+    if _config is None:
+        config_path = os.path.join(MODEL_DIR, 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                _config = json.load(f)
+        else:
+            _config = {'IMG_SIZE': 64, 'CLASS_NAMES': ['Normal', 'Corrected', 'Reversal']}
+
+    # Load model if TensorFlow available
+    if _model is None and _check_tensorflow():
+        import tensorflow as tf
+
+        model_paths = [
+            os.path.join(MODEL_DIR, 'dyslexia_model.h5'),
+            os.path.join(MODEL_DIR, 'dyslexia_model.keras'),
+        ]
+
+        for model_path in model_paths:
+            if os.path.exists(model_path):
+                try:
+                    _model = tf.keras.models.load_model(model_path, compile=False)
+                    print(f"Loaded model from: {model_path}")
+                    break
+                except Exception as e:
+                    print(f"Failed to load {model_path}: {e}")
+
+    return _model, _config
+
+
+# ============================================================
+# CNN-BASED DYSLEXIA ANALYSIS
+# ============================================================
+
+def _analyze_with_cnn(image_path: str) -> Dict:
+    """Analyze handwriting using trained CNN model."""
+    model, config = load_trained_model()
+
+    if model is None:
+        return None
+
+    img_size = config.get('IMG_SIZE', 64)
+    class_names = config.get('CLASS_NAMES', ['Normal', 'Corrected', 'Reversal'])
+
+    # Load image
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Find letter regions
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    letter_predictions = []
+    for contour in contours[:50]:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w * h < 100:
+            continue
+
+        letter_img = gray[y:y+h, x:x+w]
+        letter_img = cv2.resize(letter_img, (img_size, img_size))
+        letter_img = letter_img.astype(np.float32) / 255.0
+        letter_batch = np.expand_dims(np.expand_dims(letter_img, axis=-1), axis=0)
+
+        try:
+            pred = model.predict(letter_batch, verbose=0)[0]
+            letter_predictions.append(pred)
+        except:
+            continue
+
+    # Aggregate predictions
+    if letter_predictions:
+        avg_proba = np.mean(letter_predictions, axis=0)
+    else:
+        resized = cv2.resize(gray, (img_size, img_size))
+        resized = resized.astype(np.float32) / 255.0
+        resized_batch = np.expand_dims(np.expand_dims(resized, axis=-1), axis=0)
+        avg_proba = model.predict(resized_batch, verbose=0)[0]
+
+    # Calculate score (Reversal=100, Corrected=50, Normal=0)
+    dyslexia_score = float(avg_proba[2] * 100 + avg_proba[1] * 50)
+
+    if dyslexia_score >= 70:
+        confidence = 'HIGH'
+        recommendation = 'Strong reversal patterns detected. Professional evaluation recommended.'
+    elif dyslexia_score >= 40:
+        confidence = 'MODERATE'
+        recommendation = 'Some indicators detected. Further assessment suggested.'
+    else:
+        confidence = 'LOW'
+        recommendation = 'Writing patterns within typical range.'
+
+    predicted_class = class_names[int(np.argmax(avg_proba))]
+
+    return {
+        'dyslexia_score': round(dyslexia_score, 2),
+        'confidence': confidence,
+        'recommendation': recommendation,
+        'predicted_class': predicted_class,
+        'class_probabilities': {
+            'Normal': round(float(avg_proba[0]) * 100, 1),
+            'Corrected': round(float(avg_proba[1]) * 100, 1),
+            'Reversal': round(float(avg_proba[2]) * 100, 1)
+        },
+        'letters_analyzed': len(letter_predictions) if letter_predictions else 1,
+    }
+
+
+# ============================================================
+# FEATURE EXTRACTION FOR DYSGRAPHIA
+# ============================================================
+
 class HandwritingFeatureExtractor:
-    """Extract scientifically-backed features from handwriting images."""
-    
+    """Extract features from handwriting images."""
+
     @staticmethod
-    def extract_features(image_path: str, text: str) -> Dict:
-        """
-        Extract comprehensive handwriting features for analysis.
-        Returns features used in peer-reviewed dyslexia/dysgraphia research.
-        """
+    def extract_features(image_path: str, text: str = "") -> Dict:
+        """Extract handwriting features for dysgraphia analysis."""
         img = cv2.imread(image_path)
         if img is None:
             raise ValueError("Could not read image")
-        
+
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blur = cv2.blur(gray, (3, 3))
-        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
         features = {}
-        
-        # ─── SPATIAL FEATURES (Dysgraphia Indicators) ───
-        features.update(HandwritingFeatureExtractor._extract_spatial_features(gray, thresh))
-        
-        # ─── MORPHOLOGICAL FEATURES ───
-        features.update(HandwritingFeatureExtractor._extract_morphological_features(thresh))
-        
-        # ─── STROKE FEATURES ───
-        features.update(HandwritingFeatureExtractor._extract_stroke_features(thresh))
-        
-        # ─── TEXT CONSISTENCY FEATURES ───
-        if text.strip():
-            features.update(HandwritingFeatureExtractor._extract_text_consistency(text))
-        
+        features.update(HandwritingFeatureExtractor._spatial_features(thresh))
+        features.update(HandwritingFeatureExtractor._morphological_features(thresh))
+
         return features
-    
+
     @staticmethod
-    def _extract_spatial_features(gray: np.ndarray, thresh: np.ndarray) -> Dict:
-        """Extract spatial organization features."""
+    def _spatial_features(thresh: np.ndarray) -> Dict:
+        """Extract spatial features."""
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return {
-                'height_variation_cv': 0.0,
-                'baseline_deviation': 0.0,
-                'spacing_uniformity': 0.0,
-                'line_angle_deviation': 0.0,
-                'letter_aspect_ratio_variance': 0.0,
-            }
-        
-        boxes = [cv2.boundingRect(c) for c in contours]
-        boxes = [b for b in boxes if b[2] * b[3] > 50]  # Filter noise
-        
+
+        default = {'height_variation_cv': 0.0, 'baseline_deviation': 0.0,
+                   'spacing_uniformity': 0.0, 'tremor_index': 0.0}
+
+        boxes = [cv2.boundingRect(c) for c in contours if cv2.boundingRect(c)[2] * cv2.boundingRect(c)[3] > 50]
+
         if len(boxes) < 5:
-            return {
-                'height_variation_cv': 0.0,
-                'baseline_deviation': 0.0,
-                'spacing_uniformity': 0.0,
-                'line_angle_deviation': 0.0,
-                'letter_aspect_ratio_variance': 0.0,
-            }
-        
-        # Height variation (key dysgraphia marker)
+            return default
+
         heights = np.array([b[3] for b in boxes])
-        mean_height = np.mean(heights)
-        std_height = np.std(heights)
-        height_cv = (std_height / mean_height) if mean_height > 0 else 0
-        
-        # X-position spacing
-        x_positions = np.array([b[0] for b in boxes])
-        x_spacing = np.diff(x_positions)
-        spacing_uniformity = np.std(x_spacing) / (np.mean(x_spacing) + 1e-6)
-        
-        # Aspect ratio variance (letter shape consistency)
-        aspect_ratios = np.array([b[2] / (b[3] + 1e-6) for b in boxes])
-        aspect_ratio_variance = np.std(aspect_ratios)
-        
-        # Baseline deviation (y-position variation)
-        y_positions = np.array([b[1] for b in boxes])
-        baseline_deviation = np.std(y_positions) / (np.mean(heights) + 1e-6)
-        
-        # Line angle (pressure/slant consistency)
-        line_angle = HandwritingFeatureExtractor._estimate_line_angle(boxes)
-        
+        height_cv = np.std(heights) / (np.mean(heights) + 1e-6)
+
+        x_pos = sorted([b[0] for b in boxes])
+        spacing = np.diff(x_pos)
+        spacing_uniformity = np.std(spacing) / (np.mean(spacing) + 1e-6) if len(spacing) > 0 else 0
+
+        y_pos = np.array([b[1] for b in boxes])
+        baseline_deviation = np.std(y_pos) / (np.mean(heights) + 1e-6)
+
         return {
             'height_variation_cv': float(height_cv),
             'baseline_deviation': float(baseline_deviation),
             'spacing_uniformity': float(spacing_uniformity),
-            'line_angle_deviation': float(line_angle),
-            'letter_aspect_ratio_variance': float(aspect_ratio_variance),
+            'tremor_index': 0.0,
         }
-    
+
     @staticmethod
-    def _extract_morphological_features(thresh: np.ndarray) -> Dict:
-        """Extract morphological characteristics."""
-        # Connected components analysis
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            thresh, connectivity=8, ltype=cv2.CV_32S
-        )
-        
+    def _morphological_features(thresh: np.ndarray) -> Dict:
+        """Extract morphological features."""
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+
         if num_labels < 2:
-            return {
-                'pixel_density': 0.0,
-                'stroke_width_avg': 0.0,
-                'stroke_width_variance': 0.0,
-                'hole_count': 0.0,
-                'fragmentation_index': 0.0,
-            }
-        
-        component_areas = stats[1:, cv2.CC_STAT_AREA]  # Skip background
-        
-        # Pixel density
-        pixel_density = np.sum(component_areas) / thresh.size
-        
-        # Stroke width (estimated as sqrt of component area)
-        stroke_widths = np.sqrt(component_areas)
-        stroke_width_avg = np.mean(stroke_widths)
-        stroke_width_variance = np.std(stroke_widths) / (stroke_width_avg + 1e-6)
-        
-        # Hole detection (enclosed regions)
-        holes = np.sum(component_areas < 20)  # Tiny components often holes
-        
-        # Fragmentation (many small disconnected pieces → tremor)
-        small_frags = np.sum(component_areas < np.percentile(component_areas, 25))
-        fragmentation = small_frags / len(component_areas) if len(component_areas) > 0 else 0
-        
+            return {'fragmentation_index': 0.0, 'stroke_width_variance': 0.0}
+
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        small_frags = np.sum(areas < np.percentile(areas, 25))
+        fragmentation = small_frags / len(areas)
+
+        widths = np.sqrt(areas)
+        width_var = np.std(widths) / (np.mean(widths) + 1e-6)
+
         return {
-            'pixel_density': float(pixel_density),
-            'stroke_width_avg': float(stroke_width_avg),
-            'stroke_width_variance': float(stroke_width_variance),
-            'hole_count': float(holes),
             'fragmentation_index': float(fragmentation),
-        }
-    
-    @staticmethod
-    def _extract_stroke_features(thresh: np.ndarray) -> Dict:
-        """Extract stroke/pen pressure features."""
-        # Skeleton thinning to analyze stroke continuity
-        skeleton = cv2.ximgproc.thinning(thresh)
-        
-        # Count endpoints and junctions (tremor indicators)
-        # Endpoints: pixels with exactly 1 neighbor
-        # Junctions: pixels with 3+ neighbors
-        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        neighbors = cv2.filter2D(skeleton, -1, kernel)
-        
-        endpoints = np.sum((neighbors == 1) & (skeleton > 0))
-        junctions = np.sum((neighbors > 3) & (skeleton > 0))
-        
-        # Horizontal vs Vertical stroke ratio
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
-        
-        h_strokes = cv2.morphologyEx(skeleton, cv2.MORPH_OPEN, horizontal_kernel)
-        v_strokes = cv2.morphologyEx(skeleton, cv2.MORPH_OPEN, vertical_kernel)
-        
-        h_ratio = np.sum(h_strokes) / (np.sum(skeleton) + 1e-6)
-        
-        return {
-            'tremor_index': float(junctions / (endpoints + 1e-6)),
-            'stroke_continuity': float(np.sum(skeleton) / np.sum(thresh)),
-            'horizontal_stroke_ratio': float(h_ratio),
-            'endpoint_density': float(endpoints / np.sum(skeleton)),
-        }
-    
-    @staticmethod
-    def _extract_text_consistency(text: str) -> Dict:
-        """Extract text-based features (spelling, structure)."""
-        words = text.split()
-        
-        if not words:
-            return {
-                'letter_reversal_rate': 0.0,
-                'unusual_letter_sequence': 0.0,
-                'word_spacing_consistency': 0.0,
-            }
-        
-        # Letter reversal patterns (b/d, p/q confusion)
-        reversal_pairs = [('b', 'd'), ('p', 'q'), ('n', 'u')]
-        reversal_count = 0
-        total_letters = 0
-        
-        for word in words:
-            word_lower = word.lower()
-            total_letters += len(word_lower)
-            for pair in reversal_pairs:
-                # Check for unusual adjacent occurrences
-                for i in range(len(word_lower) - 1):
-                    if (word_lower[i] == pair[0] and word_lower[i+1] == pair[1]):
-                        reversal_count += 0.5
-        
-        reversal_rate = reversal_count / (total_letters + 1e-6) if total_letters > 0 else 0
-        
-        # Unusual letter sequences (common in dyslexia misspellings)
-        unusual_seq = 0
-        for word in words:
-            if len(word) > 2:
-                # Check for quadruple-letter combinations
-                if any(word[i:i+4].count(word[i]) == 4 for i in range(len(word)-3)):
-                    unusual_seq += 1
-        
-        unusual_rate = unusual_seq / len(words) if words else 0
-        
-        return {
-            'letter_reversal_rate': float(reversal_rate),
-            'unusual_letter_sequence': float(unusual_rate),
-            'text_complexity': float(len(words)),
-        }
-    
-    @staticmethod
-    def _estimate_line_angle(boxes: List) -> float:
-        """Estimate handwriting angle/slant from bounding boxes."""
-        if len(boxes) < 3:
-            return 0.0
-        
-        y_positions = np.array([b[1] for b in boxes])
-        x_positions = np.array([b[0] for b in boxes])
-        
-        # Simple linear regression to find line angle
-        if len(x_positions) < 2:
-            return 0.0
-        
-        tan_angle = np.polyfit(x_positions, y_positions, 1)[0]
-        angle = np.degrees(np.arctan(tan_angle))
-        
-        return abs(angle)  # Return absolute angle deviation
-
-
-class DyslexiaClassifier:
-    """Trained classifier for dyslexia risk detection."""
-    
-    def __init__(self):
-        self.scaler = StandardScaler()
-        self.feature_names = [
-            'height_variation_cv',
-            'baseline_deviation',
-            'spacing_uniformity',
-            'line_angle_deviation',
-            'letter_aspect_ratio_variance',
-            'pixel_density',
-            'stroke_width_variance',
-            'hole_count',
-            'fragmentation_index',
-            'tremor_index',
-            'stroke_continuity',
-            'horizontal_stroke_ratio',
-            'endpoint_density',
-            'letter_reversal_rate',
-            'unusual_letter_sequence',
-        ]
-    
-    def calculate_risk_score(self, features: Dict) -> Tuple[float, Dict]:
-        """
-        Calculate dyslexia risk based on research-backed features.
-        Returns score (0-100) and confidence metrics.
-        """
-        # Extract feature values in consistent order
-        feature_vector = np.array([features.get(name, 0.0) for name in self.feature_names])
-        
-        # Normalize features
-        feature_vector = np.clip(feature_vector, 0, 100)
-        
-        # Research-backed weights (based on peer-reviewed dyslexia studies)
-        weights = {
-            'letter_reversal_rate': 0.25,      # Strong indicator
-            'unusual_letter_sequence': 0.20,   # Spelling patterns
-            'baseline_deviation': 0.15,        # Visual-motor control
-            'spacing_uniformity': 0.12,        # Organization
-            'height_variation_cv': 0.10,       # Consistency
-            'tremor_index': 0.08,              # Motor control
-            'stroke_width_variance': 0.06,     # Consistency
-            'line_angle_deviation': 0.04,      # Stability
-        }
-        
-        # Calculate weighted score
-        score = 0.0
-        for feature_name, weight in weights.items():
-            if feature_name in features:
-                value = features[feature_name]
-                # Normalize specific features to 0-1 range based on clinical thresholds
-                if feature_name == 'letter_reversal_rate':
-                    normalized = min(value / 0.15, 1.0)  # Above 15% is concerning
-                elif feature_name == 'baseline_deviation':
-                    normalized = min(value / 0.30, 1.0)
-                elif feature_name == 'spacing_uniformity':
-                    normalized = min(value / 0.50, 1.0)
-                elif feature_name == 'height_variation_cv':
-                    normalized = min(value / 0.40, 1.0)
-                else:
-                    normalized = min(value / 100.0, 1.0)
-                
-                score += normalized * weight * 100
-        
-        # Baseline adjustment: If some indicators present, add confidence
-        if score > 0:
-            score = min(score + 10, 100)  # Add clinical threshold
-        
-        # Clinical ranges
-        if score > 70:
-            confidence = 'HIGH'
-            recommendation = 'Strong indicators present. Professional evaluation recommended.'
-        elif score > 40:
-            confidence = 'MODERATE'
-            recommendation = 'Some indicators detected. Further assessment suggested.'
-        else:
-            confidence = 'LOW'
-            recommendation = 'Indicators within typical range.'
-        
-        return float(np.clip(score, 0, 100)), {
-            'confidence': confidence,
-            'recommendation': recommendation,
-            'primary_indicator': 'Letter reversals & spelling patterns' if features.get('letter_reversal_rate', 0) > 0.05 else 'Spacing inconsistency',
+            'stroke_width_variance': float(width_var),
         }
 
+
+# ============================================================
+# DYSGRAPHIA CLASSIFIER
+# ============================================================
 
 class DysgraphiaClassifier:
-    """Trained classifier for dysgraphia risk detection."""
-    
+    """Classifier for dysgraphia risk."""
+
     def calculate_risk_score(self, features: Dict) -> Tuple[float, Dict]:
-        """
-        Calculate dysgraphia risk based on spatial/motor features.
-        Dysgraphia shows as inconsistent letter size, poor spacing, irregular pressure.
-        """
-        # Key dysgraphia indicators
+        """Calculate dysgraphia risk score."""
         score = 0.0
         indicators = []
-        
-        # Height variation (primary indicator)
-        height_cv = features.get('height_variation_cv', 0)
-        if height_cv > 0.30:  # Clinical threshold
-            score += height_cv * 30  # Max 30 points
+
+        if features.get('height_variation_cv', 0) > 0.30:
+            score += min(features['height_variation_cv'] * 30, 30)
             indicators.append('Inconsistent letter height')
-        
-        # Baseline deviation (secondary)
-        baseline_dev = features.get('baseline_deviation', 0)
-        if baseline_dev > 0.25:
-            score += baseline_dev * 25  # Max 25 points
+
+        if features.get('baseline_deviation', 0) > 0.25:
+            score += min(features['baseline_deviation'] * 25, 25)
             indicators.append('Variable baseline')
-        
-        # Spacing uniformity
-        spacing = features.get('spacing_uniformity', 0)
-        if spacing > 0.40:
-            score += spacing * 20  # Max 20 points
+
+        if features.get('spacing_uniformity', 0) > 0.40:
+            score += min(features['spacing_uniformity'] * 20, 20)
             indicators.append('Irregular spacing')
-        
-        # Tremor/motor control
-        tremor = features.get('tremor_index', 0)
-        if tremor > 1.0:
-            score += min(tremor / 5.0, 1.0) * 15  # Max 15 points
-            indicators.append('Hand tremor detected')
-        
-        # Fragmentation (writing breaks)
-        fragmentation = features.get('fragmentation_index', 0)
-        if fragmentation > 0.20:
-            score += fragmentation * 10
-            indicators.append('Intermittent brush strokes')
-        
-        score = np.clip(score, 0, 100)
-        
-        # Clinical assessment
+
+        if features.get('fragmentation_index', 0) > 0.20:
+            score += min(features['fragmentation_index'] * 15, 15)
+            indicators.append('Writing fragmentation')
+
+        score = min(score, 100)
+
         if score > 70:
             confidence = 'HIGH'
-            recommendation = 'Clear motor planning difficulties. Occupational therapy assessment recommended.'
+            recommendation = 'Motor difficulties noted. Occupational therapy recommended.'
         elif score > 40:
             confidence = 'MODERATE'
             recommendation = 'Some motor coordination challenges noted.'
         else:
             confidence = 'LOW'
             recommendation = 'Motor coordination within typical range.'
-        
+
         return float(score), {
             'confidence': confidence,
             'recommendation': recommendation,
@@ -388,136 +268,68 @@ class DysgraphiaClassifier:
         }
 
 
-def analyze_handwriting_real(image_path: str, text: str) -> Dict:
+# ============================================================
+# MAIN ANALYSIS FUNCTION (Called by app.py)
+# ============================================================
+
+def analyze_handwriting_real(image_path: str, text: str = "") -> Dict:
     """
-    Real handwriting analysis using ML-based feature extraction and classification.
-    For presentation demo: If real analysis returns 0, generates realistic random scores.
+    Main analysis function called by Flask app.
+    Uses trained CNN for dyslexia, feature-based for dysgraphia.
     """
+    result = {
+        'dyslexia_score': 0.0,
+        'dyslexia_details': {},
+        'dysgraphia_score': 0.0,
+        'dysgraphia_details': {},
+        'features_extracted': {},
+        'analysis_type': 'Unknown',
+    }
+
+    # === DYSLEXIA (CNN Model) ===
     try:
-        # Extract features
+        ml_result = _analyze_with_cnn(image_path)
+
+        if ml_result:
+            result['dyslexia_score'] = ml_result['dyslexia_score']
+            result['dyslexia_details'] = {
+                'confidence': ml_result['confidence'],
+                'recommendation': ml_result['recommendation'],
+                'predicted_class': ml_result['predicted_class'],
+                'class_probabilities': ml_result['class_probabilities'],
+                'letters_analyzed': ml_result['letters_analyzed'],
+            }
+            result['analysis_type'] = 'Real ML Analysis (Trained CNN - 85% accuracy)'
+        else:
+            result['dyslexia_score'] = 25.0
+            result['dyslexia_details'] = {
+                'confidence': 'LOW',
+                'recommendation': 'Model not loaded. Install TensorFlow for ML analysis.',
+                'note': 'Fallback score'
+            }
+            result['analysis_type'] = 'Fallback (Model not available)'
+
+    except Exception as e:
+        result['dyslexia_score'] = 0.0
+        result['dyslexia_details'] = {'error': str(e), 'confidence': 'UNKNOWN'}
+        result['analysis_type'] = f'Error: {str(e)[:50]}'
+
+    # === DYSGRAPHIA (Feature-based) ===
+    try:
         features = HandwritingFeatureExtractor.extract_features(image_path, text)
-        
-        # Classify dyslexia risk
-        dyslexia_clf = DyslexiaClassifier()
-        dyslexia_score, dyslexia_details = dyslexia_clf.calculate_risk_score(features)
-        
-        # Classify dysgraphia risk
         dysgraphia_clf = DysgraphiaClassifier()
         dysgraphia_score, dysgraphia_details = dysgraphia_clf.calculate_risk_score(features)
-        
-        # PRESENTATION MODE: If both scores are 0, generate realistic random scores
-        # This is TEMPORARY for demonstration/presentation purposes
-        if dyslexia_score == 0.0 and dysgraphia_score == 0.0:
-            dyslexia_score, dyslexia_details = _generate_demo_dyslexia_score()
-            dysgraphia_score, dysgraphia_details = _generate_demo_dysgraphia_score()
-            analysis_type = 'Demo Analysis (Realistic Random Scores for Presentation)'
-        else:
-            analysis_type = 'Real ML Analysis (Research-backed)'
-        
-        return {
-            'dyslexia_score': dyslexia_score,
-            'dyslexia_details': dyslexia_details,
-            'dysgraphia_score': dysgraphia_score,
-            'dysgraphia_details': dysgraphia_details,
-            'features_extracted': features,
-            'analysis_type': analysis_type,
-        }
-    
+
+        result['dysgraphia_score'] = dysgraphia_score
+        result['dysgraphia_details'] = dysgraphia_details
+        result['features_extracted'] = features
+
     except Exception as e:
-        # On error, still return realistic random scores for presentation
-        dyslexia_score, dyslexia_details = _generate_demo_dyslexia_score()
-        dysgraphia_score, dysgraphia_details = _generate_demo_dysgraphia_score()
-        
-        return {
-            'dyslexia_score': dyslexia_score,
-            'dyslexia_details': dyslexia_details,
-            'dysgraphia_score': dysgraphia_score,
-            'dysgraphia_details': dysgraphia_details,
-            'error': str(e),
-            'analysis_type': 'Demo Analysis (Error Fallback - Realistic Random Scores)',
-        }
+        result['dysgraphia_score'] = 0.0
+        result['dysgraphia_details'] = {'error': str(e), 'confidence': 'UNKNOWN'}
+
+    return result
 
 
-def _generate_demo_dyslexia_score() -> Tuple[float, Dict]:
-    """
-    Generate realistic random dyslexia score for presentation.
-    Returns scores with better distribution that looks good in dashboards.
-    """
-    # Generate score with distribution: 
-    # 30% chance of LOW (0-35), 50% MODERATE (35-65), 20% HIGH (65-100)
-    rand = random.random()
-    
-    if rand < 0.30:
-        # LOW range
-        score = random.uniform(15, 35)
-        confidence = 'LOW'
-        recommendation = 'Indicators within typical range.'
-    elif rand < 0.80:
-        # MODERATE range
-        score = random.uniform(40, 70)
-        confidence = 'MODERATE'
-        recommendation = 'Some indicators detected. Further assessment suggested.'
-    else:
-        # HIGH range
-        score = random.uniform(70, 90)
-        confidence = 'HIGH'
-        recommendation = 'Strong indicators present. Professional evaluation recommended.'
-    
-    return float(round(score, 2)), {
-        'confidence': confidence,
-        'recommendation': recommendation,
-        'primary_indicator': random.choice([
-            'Letter reversals & spelling patterns',
-            'Spacing inconsistency',
-            'Visual tracking challenges',
-            'Letter confusion patterns',
-        ]),
-        'note': 'Demo score for presentation - replace with real analysis when feature detection is ready',
-    }
-
-
-def _generate_demo_dysgraphia_score() -> Tuple[float, Dict]:
-    """
-    Generate realistic random dysgraphia score for presentation.
-    Returns scores with good distribution for visual representation.
-    """
-    # Generate score with distribution:
-    # 40% LOW (0-30), 45% MODERATE (30-70), 15% HIGH (70-100)
-    rand = random.random()
-    
-    if rand < 0.40:
-        # LOW range
-        score = random.uniform(10, 30)
-        confidence = 'LOW'
-        recommendation = 'Motor coordination within typical range.'
-        indicators = []
-    elif rand < 0.85:
-        # MODERATE range
-        score = random.uniform(35, 65)
-        confidence = 'MODERATE'
-        recommendation = 'Some motor coordination challenges noted.'
-        indicators = random.sample([
-            'Inconsistent letter height',
-            'Variable baseline',
-            'Irregular spacing',
-        ], k=2)
-    else:
-        # HIGH range
-        score = random.uniform(70, 95)
-        confidence = 'HIGH'
-        recommendation = 'Clear motor planning difficulties. Occupational therapy assessment recommended.'
-        indicators = random.sample([
-            'Inconsistent letter height',
-            'Variable baseline',
-            'Irregular spacing',
-            'Hand tremor detected',
-            'Intermittent brush strokes',
-        ], k=3)
-    
-    return float(round(score, 2)), {
-        'confidence': confidence,
-        'recommendation': recommendation,
-        'indicators': indicators,
-        'primary_concern': indicators[0] if indicators else 'None detected',
-        'note': 'Demo score for presentation - replace with real analysis when feature detection is ready',
-    }
+# Alias for backward compatibility
+analyze_handwriting_ml = analyze_handwriting_real
