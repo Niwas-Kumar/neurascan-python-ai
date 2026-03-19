@@ -7,7 +7,7 @@ from model_pipeline import generate_quiz  # Keep quiz generation from old pipeli
 app = Flask(__name__)
 
 # Configure upload folder and allowed extensions
-UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__name__)), 'uploads')
+UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 # 16 MB limit
@@ -114,6 +114,197 @@ def generate_quiz_route():
 
     quiz = generate_quiz(topic, text, question_count)
     return jsonify(quiz), 200
+
+
+@app.route('/quiz/analyze', methods=['POST'])
+def analyze_quiz_performance():
+    """
+    Analyze quiz attempt results and provide learning insights.
+
+    Expected payload:
+    {
+        "studentId": "student123",
+        "quizId": "quiz456",
+        "topic": "Grammar",
+        "totalQuestions": 5,
+        "correctAnswers": 3,
+        "score": 60.0,
+        "totalTimeMs": 180000,
+        "questionResponses": [
+            {
+                "questionId": "q1",
+                "questionText": "What is...?",
+                "correctAnswer": "A",
+                "studentAnswer": "B",
+                "isCorrect": false,
+                "responseTimeMs": 30000
+            }
+        ]
+    }
+
+    Returns learning gap analysis, strong/weak areas, and recommendations.
+    """
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"error": "Request JSON body required"}), 400
+
+    try:
+        topic = payload.get('topic', 'General')
+        total_questions = payload.get('totalQuestions', 0)
+        correct_answers = payload.get('correctAnswers', 0)
+        score = payload.get('score', 0.0)
+        total_time_ms = payload.get('totalTimeMs', 0)
+        question_responses = payload.get('questionResponses', [])
+
+        # Analyze performance patterns
+        analysis = analyze_quiz_results(
+            topic=topic,
+            total_questions=total_questions,
+            correct_answers=correct_answers,
+            score=score,
+            total_time_ms=total_time_ms,
+            question_responses=question_responses
+        )
+
+        return jsonify(analysis), 200
+
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "learningGapSummary": "Unable to analyze quiz performance.",
+            "strongAreas": [],
+            "weakAreas": [],
+            "recommendation": "Please try again later."
+        }), 500
+
+
+def analyze_quiz_results(topic, total_questions, correct_answers, score, total_time_ms, question_responses):
+    """
+    Analyze quiz performance and generate learning insights.
+    """
+    # Calculate metrics
+    accuracy = score / 100.0 if score else 0
+    avg_time_per_question = (total_time_ms / total_questions / 1000) if total_questions > 0 else 0
+    incorrect_count = total_questions - correct_answers
+
+    # Analyze response time patterns
+    fast_responses = []
+    slow_responses = []
+    incorrect_questions = []
+
+    for qr in question_responses:
+        response_time_sec = qr.get('responseTimeMs', 0) / 1000
+        if qr.get('isCorrect'):
+            if response_time_sec < 15:
+                fast_responses.append(qr)
+        else:
+            incorrect_questions.append(qr)
+        if response_time_sec > 45:
+            slow_responses.append(qr)
+
+    # Determine performance level
+    if score >= 90:
+        performance_level = "EXCELLENT"
+    elif score >= 70:
+        performance_level = "GOOD"
+    elif score >= 50:
+        performance_level = "NEEDS_IMPROVEMENT"
+    else:
+        performance_level = "STRUGGLING"
+
+    # Generate learning gap summary
+    learning_gap_summary = generate_learning_summary(
+        topic=topic,
+        score=score,
+        performance_level=performance_level,
+        accuracy=accuracy,
+        avg_time=avg_time_per_question,
+        incorrect_count=incorrect_count,
+        fast_correct=len(fast_responses),
+        slow_count=len(slow_responses)
+    )
+
+    # Identify strong and weak areas
+    strong_areas = []
+    weak_areas = []
+
+    if len(fast_responses) / max(correct_answers, 1) > 0.5:
+        strong_areas.append(f"Quick recall in {topic}")
+    if accuracy >= 0.8:
+        strong_areas.append(f"Good understanding of {topic} concepts")
+    if avg_time_per_question < 30 and accuracy >= 0.6:
+        strong_areas.append("Efficient test-taking skills")
+
+    if incorrect_count > total_questions * 0.4:
+        weak_areas.append(f"Core {topic} concepts need review")
+    if len(slow_responses) > total_questions * 0.3:
+        weak_areas.append("Time management during tests")
+    if accuracy < 0.5:
+        weak_areas.append(f"Fundamental {topic} knowledge gaps")
+
+    # Generate recommendation
+    recommendation = generate_recommendation(performance_level, topic, weak_areas)
+
+    return {
+        "performanceLevel": performance_level,
+        "learningGapSummary": learning_gap_summary,
+        "strongAreas": strong_areas if strong_areas else ["Keep practicing!"],
+        "weakAreas": weak_areas if weak_areas else [],
+        "recommendation": recommendation,
+        "metrics": {
+            "accuracy": round(accuracy * 100, 1),
+            "avgTimePerQuestion": round(avg_time_per_question, 1),
+            "fastCorrectAnswers": len(fast_responses),
+            "slowResponses": len(slow_responses)
+        }
+    }
+
+
+def generate_learning_summary(topic, score, performance_level, accuracy, avg_time, incorrect_count, fast_correct, slow_count):
+    """Generate a human-readable learning summary."""
+
+    if performance_level == "EXCELLENT":
+        summary = f"Excellent performance in {topic}! "
+        if fast_correct > 0:
+            summary += f"Strong quick recall ability with {fast_correct} rapid correct answers. "
+        summary += "Keep up the great work and consider helping classmates who may be struggling."
+
+    elif performance_level == "GOOD":
+        summary = f"Good understanding of {topic} demonstrated. "
+        if incorrect_count > 0:
+            summary += f"Review the {incorrect_count} missed question(s) to strengthen comprehension. "
+        if slow_count > 0:
+            summary += "Practice can help improve response speed."
+
+    elif performance_level == "NEEDS_IMPROVEMENT":
+        summary = f"Some {topic} concepts need more practice. "
+        summary += f"Scored {score:.0f}% with {incorrect_count} incorrect answers. "
+        summary += "Focused review of the missed topics is recommended."
+
+    else:  # STRUGGLING
+        summary = f"Significant gaps in {topic} understanding identified. "
+        summary += "Recommend one-on-one support and foundational concept review. "
+        summary += "Breaking down topics into smaller parts may help."
+
+    return summary
+
+
+def generate_recommendation(performance_level, topic, weak_areas):
+    """Generate actionable recommendation based on performance."""
+
+    if performance_level == "EXCELLENT":
+        return f"Challenge yourself with advanced {topic} materials or help tutor other students."
+
+    elif performance_level == "GOOD":
+        if weak_areas:
+            return f"Focus on: {', '.join(weak_areas[:2])}. Practice with additional exercises."
+        return f"Continue practicing {topic} to maintain and improve your skills."
+
+    elif performance_level == "NEEDS_IMPROVEMENT":
+        return f"Schedule dedicated study time for {topic}. Review class notes and try practice problems daily."
+
+    else:  # STRUGGLING
+        return f"Request additional support from teacher. Consider breaking {topic} into smaller, manageable sections."
 
 
 @app.route('/health', methods=['GET'])
