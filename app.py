@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from ml_models import analyze_handwriting_real
 from model_pipeline import generate_quiz  # Keep quiz generation from old pipeline
+from paper_validator import validate_paper_image
 
 app = Flask(__name__)
 
@@ -34,8 +35,26 @@ def analyze():
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
-        
+
         try:
+            # Validate that the image contains handwriting on paper
+            skip_validation = request.form.get('skip_validation', 'false').lower() == 'true'
+
+            if not skip_validation:
+                validation = validate_paper_image(filepath)
+                if not validation['is_valid']:
+                    # Clean up and return validation error
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    return jsonify({
+                        "error": "Invalid image",
+                        "validation_error": True,
+                        "reason": validation['reason'],
+                        "confidence": validation['confidence'],
+                        "message": "Please upload a clear image of handwriting on paper. Photos of objects, nature, or non-document images are not accepted.",
+                        "details": validation.get('details', {})
+                    }), 400
+
             # Get optional extracted text if provided
             extracted_text = request.form.get('text', '')
             
@@ -80,6 +99,23 @@ def analyze_external():
         file.save(filepath)
 
         try:
+            # Validate that the image contains handwriting on paper
+            skip_validation = request.form.get('skip_validation', 'false').lower() == 'true'
+
+            if not skip_validation:
+                validation = validate_paper_image(filepath)
+                if not validation['is_valid']:
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    return jsonify({
+                        "error": "Invalid image",
+                        "validation_error": True,
+                        "reason": validation['reason'],
+                        "confidence": validation['confidence'],
+                        "message": "Please upload a clear image of handwriting on paper. Photos of objects, nature, or non-document images are not accepted.",
+                        "details": validation.get('details', {})
+                    }), 400
+
             extracted_text = request.form.get('text', '')
             result = analyze_handwriting_real(filepath, extracted_text)
             if os.path.exists(filepath):
@@ -310,6 +346,48 @@ def generate_recommendation(performance_level, topic, weak_areas):
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"}), 200
+
+
+@app.route('/validate', methods=['POST'])
+def validate_image():
+    """
+    Validate if an uploaded image contains handwriting on paper.
+    Returns validation result without performing full analysis.
+    """
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+
+        try:
+            validation = validate_paper_image(filepath)
+
+            # Clean up
+            if os.path.exists(filepath):
+                os.remove(filepath)
+
+            return jsonify({
+                "is_valid": validation['is_valid'],
+                "confidence": validation['confidence'],
+                "reason": validation['reason'],
+                "details": validation.get('details', {}),
+                "message": "Image is valid for analysis" if validation['is_valid']
+                          else "Please upload a clear image of handwriting on paper"
+            }), 200
+
+        except Exception as e:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            return jsonify({"error": str(e), "is_valid": False}), 500
+
+    return jsonify({"error": "Invalid file type", "is_valid": False}), 400
 
 if __name__ == '__main__':
     # Start the Flask app
