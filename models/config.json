@@ -1,36 +1,13 @@
 {
   "IMG_SIZE": 64,
-  "IMG_HEIGHT": 64,
-  "IMG_WIDTH": 64,
-  "NUM_CLASSES": 3,
+  "NUM_CLASSES": 2,
   "CLASS_NAMES": [
     "Normal",
-    "Corrected",
-    "Reversal"
+    "Dyslexia"
   ],
-  "CLASS_MAPPING": {
-    "reversal": 2,
-    "corrected": 1,
-    "normal": 0
-  },
-  "test_accuracy": 0.8517532348632812,
-  "model_type": "3-class-letter-classification",
-  "description": "Dyslexia detection via letter reversal analysis",
-  "risk_mapping": {
-    "0": {
-      "name": "Normal",
-      "risk": "LOW",
-      "score_range": "0-35"
-    },
-    "1": {
-      "name": "Corrected",
-      "risk": "MODERATE",
-      "score_range": "35-70"
-    },
-    "2": {
-      "name": "Reversal",
-      "risk": "HIGH",
-      "score_range": "70-100"
-    }
-  }
+  "model_type": "binary-classification",
+  "test_accuracy": 0.921999990940094,
+  "test_auc": 0.9784711599349976,
+  "training_data": "IAM Handwriting + Kaggle Dyslexia",
+  "total_samples": 10000
 }
