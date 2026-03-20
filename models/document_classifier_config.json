@@ -1,0 +1,13 @@
+{
+  "model_type": "document_classifier_v2",
+  "framework": "pytorch",
+  "IMG_SIZE": 224,
+  "threshold": 0.521517813205719,
+  "classes": [
+    "invalid",
+    "valid_paper"
+  ],
+  "validation_accuracy": 0.9025,
+  "validation_auc": 0.9650128472222221,
+  "training_data": "RVL-CDIP + IAM + Nature/Animals"
+}
